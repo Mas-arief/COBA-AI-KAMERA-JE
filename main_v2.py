@@ -8,6 +8,7 @@ import numpy as np
 import os
 from datetime import datetime
 import pickle
+import time
 
 # ========================================
 # KONFIGURASI
@@ -23,7 +24,7 @@ face_cascade = cv2.CascadeClassifier(
 
 # Data mahasiswa
 data_mahasiswa = {
-    "mahasiswa1.jpg": {"nama": "Budi Santoso", "nim": "2021001"},
+    "mahasiswa1.jpg": {"nama": "Arief Rafi", "nim": "2021001"},
     "mahasiswa2.jpg": {"nama": "Siti Aminah", "nim": "2021002"},
     "mahasiswa3.jpg": {"nama": "Ahmad Rizki", "nim": "2021003"},
     "mahasiswa4.jpg": {"nama": "Dewi Lestari", "nim": "2021004"}
@@ -36,6 +37,20 @@ print("="*50)
 # ========================================
 # FUNGSI EKSTRAK FITUR WAJAH
 # ========================================
+
+def improve_image_quality(image):
+    """Improve kualitas image dari webcam"""
+    # Apply Gaussian Blur untuk reduce noise
+    denoised = cv2.GaussianBlur(image, (5, 5), 0)
+    
+    # Apply histogram equalization untuk brightness lebih baik
+    equalized = cv2.equalizeHist(denoised)
+    
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(equalized)
+    
+    return enhanced
 
 def extract_face_histogram(image, face):
     """Ekstrak histogram wajah sebagai fitur"""
@@ -81,30 +96,42 @@ if os.path.exists(MODEL_FILE):
 else:
     print("🔄 Training model dari foto...")
     
+    # Scanning semua mahasiswa
     for filename, info in data_mahasiswa.items():
-        filepath = os.path.join(FOTO_FOLDER, filename)
+        folder_name = filename.replace('.jpg', '')  # e.g., "mahasiswa1"
         
-        if os.path.exists(filepath):
-            # Load image
-            image = cv2.imread(filepath)
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Collect semua foto dari folder (10 foto per orang)
+        person_histograms = []
+        
+        for i in range(1, 11):
+            # Format: mahasiswa1_01.jpg, mahasiswa1_02.jpg, ..., mahasiswa1_10.jpg
+            numbered_filename = f"{folder_name}_{i:02d}.jpg"
+            filepath = os.path.join(FOTO_FOLDER, numbered_filename)
             
-            # Deteksi wajah
-            faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-            
-            if len(faces) > 0:
-                # Ambil wajah pertama
-                face = faces[0]
-                hist = extract_face_histogram(gray, face)
+            if os.path.exists(filepath):
+                # Load image
+                image = cv2.imread(filepath)
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
                 
-                known_histograms.append(hist)
-                known_names.append(info["nama"])
-                known_nims.append(info["nim"])
-                print(f"✓ {info['nama']} - {filename}")
-            else:
-                print(f"✗ Tidak ada wajah di: {filename}")
+                # Deteksi wajah
+                faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+                
+                if len(faces) > 0:
+                    # Ambil wajah terbesar
+                    face = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)[0]
+                    hist = extract_face_histogram(gray, face)
+                    person_histograms.append(hist)
+        
+        # Jika ada histogram dari orang ini, average-kan
+        if len(person_histograms) > 0:
+            # Average histogram dari semua foto
+            avg_hist = np.mean(person_histograms, axis=0)
+            known_histograms.append(avg_hist)
+            known_names.append(info["nama"])
+            known_nims.append(info["nim"])
+            print(f"✓ {info['nama']} - {len(person_histograms)}/10 foto")
         else:
-            print(f"✗ File tidak ada: {filepath}")
+            print(f"✗ Tidak ada foto untuk: {info['nama']}")
     
     # Simpan model
     if len(known_names) > 0:
@@ -129,6 +156,15 @@ print("="*50)
 
 cap = cv2.VideoCapture(0)
 
+# Set camera properties untuk kualitas terbaik
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap.set(cv2.CAP_PROP_FPS, 30)
+cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+cap.set(cv2.CAP_PROP_BRIGHTNESS, 100)
+cap.set(cv2.CAP_PROP_CONTRAST, 50)
+
 if not cap.isOpened():
     print("❌ Kamera tidak terdeteksi!")
     exit()
@@ -149,14 +185,39 @@ while True:
         print("❌ Gagal mengambil frame")
         break
     
-    frame_counter += 1
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    # Flip frame agar tidak mirror
+    frame = cv2.flip(frame, 1)
     
-    # Deteksi wajah (setiap 5 frame untuk performa)
-    if frame_counter % 5 == 0:
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    frame_counter += 1
+    
+    # Improve kualitas gambar dari webcam
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = improve_image_quality(gray)
+    
+    # Apply slight sharpening untuk lebih jelas
+    kernel = np.array([[-1,-1,-1],
+                       [-1, 9,-1],
+                       [-1,-1,-1]]) / 1.0
+    gray = cv2.filter2D(gray, -1, kernel)
+    
+    # Deteksi wajah (setiap 2 frame untuk deteksi lebih responsif)
+    if frame_counter % 2 == 0:
+        # Improve detection dengan parameter lebih baik
+        faces = face_cascade.detectMultiScale(
+            gray, 
+            scaleFactor=1.05,  # Lebih sensitif
+            minNeighbors=4,    # Lebih relaxed
+            minSize=(70, 70),  # Minimum size
+            maxSize=(500, 500),
+            flags=cv2.CASCADE_SCALE_IMAGE
+        )
         
-        for (x, y, w, h) in faces:
+        # Hanya proses wajah terbesar (fokus pada 1 wajah)
+        if len(faces) > 0:
+            # Urutkan berdasarkan ukuran (area), ambil yang terbesar
+            faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+            x, y, w, h = faces[0]  # Ambil wajah terbesar
+            
             # Ekstrak histogram
             face_roi = gray[y:y+h, x:x+w]
             current_hist = extract_face_histogram(frame, (x, y, w, h))
@@ -171,13 +232,13 @@ while True:
                     best_distance = distance
                     best_match = i
             
-            # Threshold untuk match
-            if best_distance < 0.3:  # Semakin kecil, semakin mirip
+            # Threshold lebih ketat untuk match
+            if best_distance < 0.25 and best_match is not None:
                 name = known_names[best_match]
                 nim = known_nims[best_match]
                 confidence = (1 - best_distance) * 100
                 
-                # Catat absensi
+                # Catat absensi - hanya saat pertama kali terdeteksi
                 if nim not in absensi_hari_ini:
                     waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     absensi_hari_ini[nim] = {
@@ -185,16 +246,30 @@ while True:
                         "waktu": waktu
                     }
                     print(f"✓ HADIR: {name} ({nim}) - {confidence:.1f}%")
+                    
+                    # Auto capture dan simpan foto
+                    foto_filename = f"capture_{nim}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                    cv2.imwrite(foto_filename, frame)
+                    print(f"📸 Foto tersimpan: {foto_filename}")
+                    
+                    # Tambah delay untuk menghindari deteksi duplikat
+                    time.sleep(2)
                 
                 # Draw box hijau
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 cv2.rectangle(frame, (x, y-35), (x+w, y), (0, 255, 0), cv2.FILLED)
-                cv2.putText(frame, name, (x+5, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                cv2.putText(frame, f"{name} ({confidence:.0f}%)", (x+5, y-8), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
             else:
                 # Draw box merah untuk unknown
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
                 cv2.rectangle(frame, (x, y-35), (x+w, y), (0, 0, 255), cv2.FILLED)
-                cv2.putText(frame, "Unknown", (x+5, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                if best_match is not None:
+                    cv2.putText(frame, f"Unknown ({(1-best_distance)*100:.0f}%)", (x+5, y-8), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                else:
+                    cv2.putText(frame, "Unknown", (x+5, y-8), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
     
     # Info di layar
     cv2.putText(frame, f"Hadir: {len(absensi_hari_ini)}/{len(known_names)}", 
